@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"products-api/data"
-	"regexp"
 	"strconv"
+
+	"github.com/gorilla/mux"
 )
 
 // Products is a http.Handler
@@ -18,48 +20,8 @@ func NewProducts(l *log.Logger) *Products {
 	return &Products{l}
 }
 
-func (p *Products) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		p.getProducts(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPost {
-		p.addProduct(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPut {
-		// expect id in URI
-		reg := regexp.MustCompile("/([0-9]+)")
-		group := reg.FindAllStringSubmatch(r.URL.Path, -1)
-
-		if len(group) != 1 {
-			http.Error(rw, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		if len(group[0]) != 2 {
-			http.Error(rw, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		idString := group[0][1]
-		id, err := strconv.Atoi(idString)
-		if err != nil {
-			http.Error(rw, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		p.updateProduct(id, rw, r)
-		return
-	}
-
-	// catch all
-	rw.WriteHeader(http.StatusMethodNotAllowed)
-}
-
-func (p *Products) getProducts(rw http.ResponseWriter, r *http.Request) {
+// GetProducts returns products from the data store
+func (p *Products) GetProducts(rw http.ResponseWriter, r *http.Request) {
 	// fetch products from datastore
 	listproducts := data.GetProducts()
 
@@ -70,24 +32,23 @@ func (p *Products) getProducts(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *Products) addProduct(rw http.ResponseWriter, r *http.Request) {
-	prod := &data.Product{}
-	err := prod.FromJSON(r.Body)
-	if err != nil {
-		http.Error(rw, "Unable to decode JSON", http.StatusBadRequest)
-	}
-
-	data.AddProduct(prod)
+// AddProduct adds a product to the data store
+func (p *Products) AddProduct(rw http.ResponseWriter, r *http.Request) {
+	prod := r.Context().Value(KeyProduct{}).(data.Product)
+	data.AddProduct(&prod)
 }
 
-func (p *Products) updateProduct(id int, rw http.ResponseWriter, r *http.Request) {
-	prod := &data.Product{}
-	err := prod.FromJSON(r.Body)
+// UpdateProducts updates the product of a given ID
+func (p *Products) UpdateProducts(rw http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := strconv.Atoi(vars["id"])
 	if err != nil {
-		http.Error(rw, "Unable to decode JSON", http.StatusBadRequest)
+		http.Error(rw, "Unable to convert id", http.StatusBadRequest)
 	}
 
-	err = data.UpdateProduct(id, prod)
+	prod := r.Context().Value(KeyProduct{}).(data.Product)
+
+	err = data.UpdateProduct(id, &prod)
 	if err == data.ErrProductNotFound {
 		http.Error(rw, "Product not found", http.StatusNotFound)
 		return
@@ -97,4 +58,25 @@ func (p *Products) updateProduct(id int, rw http.ResponseWriter, r *http.Request
 		http.Error(rw, "Product not found", http.StatusNotFound)
 		return
 	}
+}
+
+// KeyProduct is a product key for contexts
+type KeyProduct struct{}
+
+// MiddlewareProductValidation validates new or updated products
+func (p Products) MiddlewareProductValidation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		prod := data.Product{}
+
+		err := prod.FromJSON(r.Body)
+		if err != nil {
+			http.Error(rw, "Unable to decode JSON", http.StatusBadRequest)
+			return
+		}
+
+		context := context.WithValue(r.Context(), KeyProduct{}, prod)
+		r = r.WithContext(context)
+
+		next.ServeHTTP(rw, r)
+	})
 }
